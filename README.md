@@ -1,4 +1,4 @@
-# pothos 🪴
+# Pothos 🪴
 
 Fast, keyboard-driven photo culling for a folder of JPGs. One Rust binary serves a local web UI.
 Rotation is lossless (only the EXIF orientation flag changes). Tags live in `.pothos.json`
