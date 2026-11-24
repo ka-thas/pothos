@@ -14,12 +14,13 @@ I made pothos to be a lightweight, fast way to manage pictures from my Charmera.
 pothos shows the whole folder as a grid, rotates with one key, and sends picks to the iPhone with AirDrop.
 
 ## Install (macOS)
-    xcode-select --install          # once, if you don't have the Command Line Tools
     cargo install --path .          # builds the Swift AirDrop helper too
 
 ## Run
     pothos ~/Pictures/some-folder         # opens http://127.0.0.1:8787
     pothos . --port 9000 --no-open
+
+Alternatively run `pothos` from within the folder with your pictures.
 
 ## Shortcuts (press ? in the app)
 - Move: arrows or H J K L, G / Shift+G first/last, Enter open, Esc back
