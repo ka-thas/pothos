@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pothos</title>
+<style>
+  :root {
+    --bg: #111214; --panel: #1b1d21; --line: #2c2f35; --text: #e7e8ea; --dim: #8b8f98;
+    --accent: #e7e8ea;
+    --red: #e5484d; --yellow: #f5c518; --green: #30a46c; --blue: #3e8ef7; --purple: #8e4ec6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden; user-select: none; }
+
+  header { display: flex; align-items: center; gap: 14px; padding: 8px 14px;
+    border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
+  header .folder { font-weight: 600; }
+  header .stat { color: var(--dim); font-variant-numeric: tabular-nums; }
+  header .spacer { flex: 1; }
+  header .filters { display: flex; gap: 6px; }
+  .chip { width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
+    display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #000a; }
+  .chip.on { border-color: var(--text); }
+  .chip.all { background: transparent; border: 1px dashed var(--dim); color: var(--dim); }
+  .chip.all.on { border: 2px solid var(--text); color: var(--text); }
+  kbd { font: 11px ui-monospace, Menlo, monospace; padding: 1px 5px; border: 1px solid var(--line);
+    border-bottom-width: 2px; border-radius: 4px; color: var(--text); background: #0006; }
+
+  main { flex: 1; overflow: auto; position: relative; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cell, 190px), 1fr));
+    gap: 8px; padding: 12px; }
+  .cell { position: relative; aspect-ratio: 1; background: var(--panel); border-radius: 6px;
+    display: grid; place-items: center; overflow: hidden; outline: 2px solid transparent; outline-offset: 1px; }
+  .cell img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  .cell.cur { outline-color: var(--accent); }
+  .cell.marked::after { content: ""; position: absolute; inset: 0; border: 3px solid var(--blue);
+    border-radius: 6px; background: #3e8ef722; pointer-events: none; }
+  .cell .name { position: absolute; left: 6px; bottom: 4px; font-size: 11px; color: var(--dim);
+    background: #000b; padding: 0 5px; border-radius: 3px; }
+  .dots { position: absolute; top: 6px; right: 6px; display: flex; gap: 3px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; box-shadow: 0 0 0 1.5px #000a; }
+  .cell .check { position: absolute; top: 6px; left: 6px; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--blue); color: #fff; font-size: 12px; display: none; place-items: center; }
+  .cell.marked .check { display: grid; }
+
+  #single { position: absolute; inset: 0; display: none; background: #000; }
+  #single.show { display: block; }
+  #single img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #single .info { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 12px; align-items: center;
+    padding: 10px 14px; background: linear-gradient(transparent, #000c); }
+  #single .info .dots { position: static; }
+  #single .info .dot { width: 14px; height: 14px; }
+  #single .marked-badge { color: var(--blue); font-weight: 600; display: none; }
+  #single.marked .marked-badge { display: inline; }
+
+  .empty { color: var(--dim); padding: 40px; text-align: center; }
+
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #000d;
+    border: 1px solid var(--line); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .15s;
+    pointer-events: none; z-index: 20; }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: var(--red); color: #ffb4b6; }
+
+  #help { position: fixed; inset: 0; background: #000b; display: none; place-items: center; z-index: 10; }
+  #help.show { display: grid; }
+  #help .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px;
+    columns: 2; column-gap: 36px; max-width: 760px; }
+  #help h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+    break-after: avoid; }
+  #help .row { display: flex; justify-content: space-between; gap: 18px; padding: 3px 0; break-inside: avoid; }
+  #help .sec { break-inside: avoid; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="folder" id="folder">pothos</span>
+  <span class="stat" id="count"></span>
+  <span class="stat" id="markedCount"></span>
+  <span class="spacer"></span>
+  <span class="filters" id="filters"></span>
+  <span class="stat"><kbd>?</kbd> shortcuts</span>
+</header>
+<main id="main">
+  <div id="grid"></div>
+  <div id="single"><img id="big" alt="">
+    <div class="info"><span id="sname"></span><span class="dots" id="sdots"></span>
+      <span class="marked-badge">marked</span><span class="spacer" style="flex:1"></span>
+      <span class="stat" id="spos"></span></div>
+  </div>
+</main>
+<div id="toast"></div>
+<div id="help"><div class="box">
+  <div class="sec"><h3>Navigate</h3>
+    <div class="row"><span>Move</span><span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> or <kbd>H</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd></span></div>
+    <div class="row"><span>Open / back to grid</span><span><kbd>Enter</kbd> <kbd>Esc</kbd></span></div>
+    <div class="row"><span>First / last</span><span><kbd>G</kbd> <kbd>Shift</kbd>+<kbd>G</kbd></span></div>
+    <div class="row"><span>Bigger / smaller grid</span><span><kbd>+</kbd> <kbd>−</kbd></span></div>
+  </div>
+  <div class="sec"><h3>Edit</h3>
+    <div class="row"><span>Rotate right / left</span><span><kbd>R</kbd> <kbd>Shift</kbd>+<kbd>R</kbd></span></div>
+    <div class="row"><span>Toggle color tag</span><span><kbd>1</kbd>–<kbd>5</kbd></span></div>
+    <div class="row"><span>Clear tags</span><span><kbd>0</kbd></span></div>
+    <div class="row"><span>Reject (to _rejected/)</span><span><kbd>X</kbd> or <kbd>⌫</kbd></span></div>
+    <div class="row"><span>Undo reject</span><span><kbd>U</kbd> or <kbd>⌘Z</kbd></span></div>
+  </div>
+  <div class="sec"><h3>Select</h3>
+    <div class="row"><span>Mark / unmark</span><span><kbd>Space</kbd></span></div>
+    <div class="row"><span>Mark and move</span><span><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></span></div>
+    <div class="row"><span>Mark all visible</span><span><kbd>A</kbd></span></div>
+    <div class="row"><span>Clear marks</span><span><kbd>Esc</kbd> (in grid)</span></div>
+    <div class="row"><span>Edits apply to marked, else current</span><span></span></div>
+  </div>
+  <div class="sec"><h3>Filter and share</h3>
+    <div class="row"><span>Show only color</span><span><kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>5</kbd></span></div>
+    <div class="row"><span>Show untagged</span><span><kbd>Shift</kbd>+<kbd>0</kbd></span></div>
+    <div class="row"><span>Show all</span><span><kbd>F</kbd></span></div>
+    <div class="row"><span>AirDrop to phone</span><span><kbd>S</kbd></span></div>
+    <div class="row"><span>This help</span><span><kbd>?</kbd></span></div>
+  </div>
+</div></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let COLORS = ["red", "yellow", "green", "blue", "purple"];
+let items = [];          // [{name, v, tags}]
+let cur = null;          // current item name
+let marked = new Set();  // marked names
+let filter = null;       // null | color | "untagged"
+let view = "grid";
+let cellSize = 190;
+const cells = new Map(); // name -> element
+
+const visible = () => items.filter((it) =>
+  filter === null ? true : filter === "untagged" ? it.tags.length === 0 : it.tags.includes(filter));
+const imgUrl = (it) => `/img/${encodeURIComponent(it.name)}?v=${it.v}`;
+
+let toastTimer;
+function toast(msg, err = false) {
+  const t = $("toast");
+  t.textContent = msg; t.className = "show" + (err ? " err" : "");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = ""), 1600);
+}
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function load() {
+  const d = await api("/api/list");
+  COLORS = d.colors;
+  items = d.items;
+  $("folder").textContent = d.folder;
+  document.title = d.folder + " · pothos";
+  const names = new Set(items.map((i) => i.name));
+  marked = new Set([...marked].filter((n) => names.has(n)));
+  if (!cur || !names.has(cur)) cur = items[0]?.name ?? null;
+  buildFilters();
+  render();
+}
+
+function buildFilters() {
+  const f = $("filters"); f.innerHTML = "";
+  const all = document.createElement("span");
+  all.className = "chip all" + (filter === null ? " on" : ""); all.textContent = "∗"; all.title = "Show all (F)";
+  all.onclick = () => setFilter(null); f.append(all);
+  COLORS.forEach((c, i) => {
+    const n = items.filter((it) => it.tags.includes(c)).length;
+    const el = document.createElement("span");
+    el.className = "chip" + (filter === c ? " on" : "");
+    el.style.background = `var(--${c})`; el.textContent = n || ""; el.title = `${c} (Shift+${i + 1})`;
+    el.onclick = () => setFilter(filter === c ? null : c); f.append(el);
+  });
+}
+
+function dotsHtml(tags) {
+  return tags.map((t) => `<span class="dot" style="background:var(--${t})"></span>`).join("");
+}
+
+function makeCell(it) {
+  const el = document.createElement("div");
+  el.className = "cell";
+  el.innerHTML = `<img loading="lazy" decoding="async" alt=""><span class="dots"></span><span class="check">✓</span><span class="name"></span>`;
+  el.onclick = (e) => {
+    if (e.metaKey || e.shiftKey) toggleMark(it.name); else { cur = it.name; render(); }
+  };
+  el.ondblclick = () => { cur = it.name; setView("single"); };
+  return el;
+}
+
+function render() {
+  const vis = visible();
+  if (cur && !vis.some((i) => i.name === cur)) cur = vis[0]?.name ?? null;
+  const grid = $("grid");
+  grid.style.setProperty("--cell", cellSize + "px");
+  const keep = new Set(vis.map((i) => i.name));
+  for (const [n, el] of cells) if (!keep.has(n) || !items.some((i) => i.name === n)) { el.remove(); if (!items.some((i) => i.name === n)) cells.delete(n); }
+  for (const it of vis) {
+    let el = cells.get(it.name);
+    if (!el) { el = makeCell(it); cells.set(it.name, el); }
+    const img = el.querySelector("img"); const src = imgUrl(it);
+    if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+    el.querySelector(".dots").innerHTML = dotsHtml(it.tags);
+    el.querySelector(".name").textContent = it.name;
+    el.classList.toggle("cur", it.name === cur);
+    el.classList.toggle("marked", marked.has(it.name));
+    grid.appendChild(el); // keeps order; moves existing nodes
+  }
+  let empty = grid.querySelector(".empty");
+  if (!vis.length) { if (!empty) { empty = document.createElement("div"); empty.className = "empty"; grid.append(empty); }
+    empty.textContent = items.length ? "No photos match this filter. Press F to show all." : "No JPG files in this folder."; }
+  else if (empty) empty.remove();
+
+  $("count").textContent = `${vis.length}${filter ? " / " + items.length : ""} photos`;
+  $("markedCount").textContent = marked.size ? `${marked.size} marked` : "";
+  buildFilters();
+
+  const it = vis.find((i) => i.name === cur);
+  $("single").classList.toggle("show", view === "single" && !!it);
+  if (view === "single" && it) {
+    const src = imgUrl(it);
+    if ($("big").getAttribute("src") !== src) $("big").setAttribute("src", src);
+    $("sname").textContent = it.name;
+    $("sdots").innerHTML = dotsHtml(it.tags);
+    $("single").classList.toggle("marked", marked.has(it.name));
+    $("spos").textContent = `${vis.indexOf(it) + 1} / ${vis.length}`;
+    const i = vis.indexOf(it);
+    [vis[i + 1], vis[i - 1]].forEach((n) => { if (n) new Image().src = imgUrl(n); });
+  } else if (it) {
+    cells.get(cur)?.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function setView(v) { view = v; render(); }
+function setFilter(f) { filter = f; render(); toast(f === null ? "Showing all" : `Filter: ${f}`); }
+
+function columns() {
+  return getComputedStyle($("grid")).gridTemplateColumns.split(" ").length || 1;
+}
+
+function move(delta) {
+  const vis = visible(); if (!vis.length) return;
+  const i = Math.max(0, vis.findIndex((x) => x.name === cur));
+  const j = Math.min(vis.length - 1, Math.max(0, i + delta));
+  cur = vis[j].name; render();
+}
+
+function targets() {
+  const vis = new Set(visible().map((i) => i.name));
+  const m = [...marked].filter((n) => vis.has(n));
+  return m.length ? m : cur ? [cur] : [];
+}
+
+function toggleMark(name) {
+  marked.has(name) ? marked.delete(name) : marked.add(name); render();
+}
+
+async function rotate(cw) {
+  const names = targets(); if (!names.length) return;
+  try {
+    const res = await api("/api/rotate", { names, cw });
+    for (const it of items) if (res[it.name]) it.v = res[it.name];
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function tag(color) {
+  const names = targets(); if (!names.length) return;
+  try {
+    const res = await api("/api/tag", { names, color });
+    for (const it of items) if (res[it.name]) it.tags = res[it.name];
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function reject() {
+  const names = targets(); if (!names.length) return;
+  const vis = visible();
+  const after = vis.slice(vis.findIndex((i) => i.name === cur)).find((i) => !names.includes(i.name))
+    ?? [...vis].reverse().find((i) => !names.includes(i.name));
+  try {
+    await api("/api/reject", { names });
+    names.forEach((n) => { marked.delete(n); cells.get(n)?.remove(); cells.delete(n); });
+    items = items.filter((i) => !names.includes(i.name));
+    cur = after?.name ?? null;
+    render(); toast(`Rejected ${names.length} · U to undo`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function undo() {
+  try {
+    const back = await api("/api/undo", {});
+    if (!back.length) return toast("Nothing to undo");
+    await load(); cur = back[0]; render(); toast(`Restored ${back.length}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function airdrop() {
+  const names = targets(); if (!names.length) return;
+  try {
+    await api("/api/airdrop", { names });
+    toast(`AirDrop: ${names.length} photo${names.length > 1 ? "s" : ""}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+document.addEventListener("keydown", (e) => {
+  const help = $("help");
+  if (help.classList.contains("show")) { if (e.key === "Escape" || e.key === "?") help.classList.remove("show"); e.preventDefault(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); return undo(); }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  const k = e.key, code = e.code, single = view === "single";
+  const cols = single ? 1 : columns();
+  const digit = code.startsWith("Digit") ? +code.slice(5) : null;
+
+  if (e.shiftKey && digit !== null) {           // Shift+1..5 filter, Shift+0 untagged
+    if (digit >= 1 && digit <= 5) setFilter(filter === COLORS[digit - 1] ? null : COLORS[digit - 1]);
+    else if (digit === 0) setFilter(filter === "untagged" ? null : "untagged");
+  } else if (digit !== null && digit <= 5) {
+    tag(digit === 0 ? null : COLORS[digit - 1]);
+  } else if (e.shiftKey && (k === "ArrowRight" || k === "ArrowLeft")) {
+    if (cur) marked.add(cur); move(k === "ArrowRight" ? 1 : -1); if (cur) marked.add(cur); render();
+  } else switch (k) {
+    case "ArrowRight": case "l": move(1); break;
+    case "ArrowLeft": case "h": move(-1); break;
+    case "ArrowDown": case "j": move(single ? 1 : cols); break;
+    case "ArrowUp": case "k": move(single ? -1 : -cols); break;
+    case "g": move(-Infinity); break;
+    case "G": move(Infinity); break;
+    case "Home": move(-Infinity); break;
+    case "End": move(Infinity); break;
+    case "Enter": setView(single ? "grid" : "single"); break;
+    case "Escape":
+      if (single) setView("grid"); else if (marked.size) { marked.clear(); render(); } break;
+    case " ": if (cur) toggleMark(cur); break;
+    case "a": visible().forEach((i) => marked.add(i.name)); render(); break;
+    case "r": rotate(true); break;
+    case "R": rotate(false); break;
+    case "x": case "Backspace": case "Delete": reject(); break;
+    case "u": undo(); break;
+    case "s": airdrop(); break;
+    case "f": setFilter(null); break;
+    case "+": case "=": cellSize = Math.min(600, cellSize + 40); render(); break;
+    case "-": case "_": cellSize = Math.max(90, cellSize - 40); render(); break;
+    case "?": help.classList.add("show"); break;
+    default: return;
+  }
+  e.preventDefault();
+});
+
+$("help").onclick = () => $("help").classList.remove("show");
+window.addEventListener("focus", load); // pick up new files when you come back
+load().catch((e) => toast(e.message, true));
+</script>
+</body>
+</html>
