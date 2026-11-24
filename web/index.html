@@ -30,8 +30,10 @@
   kbd { font: 11px ui-monospace, Menlo, monospace; padding: 1px 5px; border: 1px solid var(--line);
     border-bottom-width: 2px; border-radius: 4px; color: var(--text); background: #0006; }
 
-  main { flex: 1; overflow: auto; position: relative; }
-  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cell, 190px), 1fr));
+  main { flex: 1; overflow: hidden; position: relative; }
+  /* The grid scrolls on its own, so the single view (also inset: 0 in main) always covers the visible area. */
+  #grid { position: absolute; inset: 0; overflow: auto; overflow-anchor: none; align-content: start;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cell, 190px), 1fr));
     gap: 8px; padding: 12px; }
   .cell { position: relative; aspect-ratio: 1; background: var(--panel); border-radius: 6px;
     display: grid; place-items: center; overflow: hidden; outline: 2px solid transparent; outline-offset: 1px; }
@@ -240,6 +242,23 @@ function render() {
 function setView(v) { view = v; render(); }
 function setFilter(f) { filter = f; render(); toast(f === null ? "Showing all" : `Filter: ${f}`); }
 
+// Change the grid size while keeping the current photo at the same spot on screen.
+function resize(delta) {
+  const next = Math.min(600, Math.max(90, cellSize + delta));
+  if (next === cellSize) return;
+  const g = $("grid"), el = cells.get(cur);
+  const mid = (r) => r.top + r.height / 2;
+  const box = g.getBoundingClientRect(), r = el?.getBoundingClientRect();
+  const onScreen = r && r.bottom > box.top && r.top < box.bottom;
+  const y = onScreen ? mid(r) : null;
+  cellSize = next;
+  if (view === "single" || !el) return render();
+  g.style.setProperty("--cell", cellSize + "px");
+  if (y === null) el.scrollIntoView({ block: "center" });
+  else g.scrollTop += mid(el.getBoundingClientRect()) - y;
+  render();
+}
+
 function columns() {
   return getComputedStyle($("grid")).gridTemplateColumns.split(" ").length || 1;
 }
@@ -346,8 +365,8 @@ document.addEventListener("keydown", (e) => {
     case "u": undo(); break;
     case "s": airdrop(); break;
     case "f": setFilter(null); break;
-    case "+": case "=": cellSize = Math.min(600, cellSize + 40); render(); break;
-    case "-": case "_": cellSize = Math.max(90, cellSize - 40); render(); break;
+    case "+": case "=": resize(40); break;
+    case "-": case "_": resize(-40); break;
     case "?": help.classList.add("show"); break;
     default: return;
   }
