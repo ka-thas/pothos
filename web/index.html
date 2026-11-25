@@ -87,6 +87,16 @@
     break-after: avoid; }
   #help .row { display: flex; justify-content: space-between; gap: 18px; padding: 3px 0; break-inside: avoid; }
   #help .sec { break-inside: avoid; margin-bottom: 14px; }
+
+  #confirm { position: fixed; inset: 0; background: #000b; display: none; place-items: center; z-index: 10; }
+  #confirm.show { display: grid; }
+  #confirm .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px;
+    max-width: 440px; line-height: 1.6; }
+  #confirm h3 { margin: 0 0 8px; font-size: 14px; }
+  #confirm .dim { color: var(--dim); }
+  #confirm .keys { margin-top: 14px; color: var(--dim); }
+  header .pub { color: var(--dim); cursor: pointer; }
+  header .pub:hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -96,6 +106,7 @@
   <span class="stat" id="markedCount"></span>
   <span class="spacer"></span>
   <span class="filters" id="filters"></span>
+  <span class="stat pub" id="publishBtn" hidden title="Publish green photos to the site (P)">Publish</span>
   <span class="stat"><kbd>?</kbd> shortcuts</span>
 </header>
 <main id="main">
@@ -107,6 +118,7 @@
   </div>
 </main>
 <div id="toast"></div>
+<div id="confirm"><div class="box" id="confirmBox"></div></div>
 <div id="help"><div class="box">
   <div class="sec"><h3>Navigate</h3>
     <div class="row"><span>Move</span><span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> or <kbd>H</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd></span></div>
@@ -134,6 +146,7 @@
     <div class="row"><span>Show untagged</span><span><kbd>Shift</kbd>+<kbd>0</kbd></span></div>
     <div class="row"><span>Show all</span><span><kbd>F</kbd></span></div>
     <div class="row"><span>AirDrop to phone</span><span><kbd>S</kbd></span></div>
+    <div class="row"><span>Publish green photos to the site</span><span><kbd>P</kbd></span></div>
     <div class="row"><span>This help</span><span><kbd>?</kbd></span></div>
   </div>
 </div></div>
@@ -151,6 +164,8 @@ let filter = null;       // null | color | "untagged"
 let view = "grid";
 let cellSize = 190;
 let nextCur = null;      // key to select once the next folder listing arrives
+let canPublish = false;  // a publish config exists (see README)
+let publishing = false;
 const cells = new Map(); // key -> element
 
 const FOLDER_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2h8.4A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>`;
@@ -166,10 +181,10 @@ const visible = () => items.filter((it) =>
 const entries = () => [...folders.map((f) => "/" + f.name), ...visible().map((i) => i.name)];
 
 let toastTimer;
-function toast(msg, err = false) {
+function toast(msg, err = false, ms = err ? 4000 : 1600) {
   const t = $("toast");
   t.textContent = msg; t.className = "show" + (err ? " err" : "");
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = ""), 1600);
+  clearTimeout(toastTimer); if (ms !== Infinity) toastTimer = setTimeout(() => (t.className = ""), ms);
 }
 
 async function api(path, body) {
@@ -184,6 +199,7 @@ async function load() {
   const d = await api("/api/list?" + qs({ dir }));
   if (at !== dir) return; // the user moved to another folder meanwhile
   COLORS = d.colors; root = d.root; items = d.items; folders = d.folders;
+  canPublish = d.publish; $("publishBtn").hidden = !canPublish;
   const keys = new Set([...folders.map((f) => "/" + f.name), ...items.map((i) => i.name)]);
   marked = new Set([...marked].filter((n) => keys.has(n)));
   if (nextCur && keys.has(nextCur)) cur = nextCur;
@@ -425,7 +441,46 @@ async function airdrop() {
   } catch (e) { toast(e.message, true); }
 }
 
+// Publishing: a dry run first, then a confirm step, then the real upload.
+async function startPublish() {
+  if (publishing) return;
+  publishing = true;
+  toast("Checking the bucket…", false, Infinity);
+  try {
+    const r = await api("/api/publish", { dryRun: true });
+    $("toast").className = "";
+    const box = $("confirmBox"); box.innerHTML = "";
+    const line = (text, cls = "") => box.append(Object.assign(document.createElement("div"), { textContent: text, className: cls }));
+    box.append(Object.assign(document.createElement("h3"), { textContent: `Publish to ${r.bucket}?` }));
+    line(`${plural(r.green, "green photo")} under ${root}: ${r.new} new, ${r.changed} changed, ${r.unchanged} unchanged.`);
+    if (r.removed) line(`${plural(r.removed, "photo")} here no longer green or rejected, so removed from the site.`);
+    if (r.keptOther) line(`${plural(r.keptOther, "photo")} published from other folders stay as they are.`, "dim");
+    if (!r.new && !r.changed && !r.removed) line("Nothing changed since the last publish.", "dim");
+    r.warnings.forEach((w) => line(w, "dim"));
+    line("Enter to publish · Esc to cancel", "keys");
+    $("confirm").classList.add("show");
+  } catch (e) { toast(e.message, true); publishing = false; }
+}
+function cancelPublish() { $("confirm").classList.remove("show"); publishing = false; }
+async function confirmPublish() {
+  $("confirm").classList.remove("show");
+  toast("Publishing…", false, Infinity);
+  try {
+    const r = await api("/api/publish", { dryRun: false });
+    const parts = [`${r.new + r.changed} uploaded`, r.removed && `${r.removed} removed`, r.unchanged && `${r.unchanged} unchanged`];
+    toast("Published: " + parts.filter(Boolean).join(", "), false, 3000);
+    if (r.warnings.length) console.warn("pothos publish:", r.warnings);
+  } catch (e) { toast(e.message, true, 6000); }
+  publishing = false;
+}
+$("publishBtn").onclick = startPublish;
+$("confirm").onclick = (e) => { if (e.target.id === "confirm") cancelPublish(); };
+
 document.addEventListener("keydown", (e) => {
+  if ($("confirm").classList.contains("show")) {
+    if (e.key === "Enter") confirmPublish(); else if (e.key === "Escape") cancelPublish();
+    e.preventDefault(); return;
+  }
   const help = $("help");
   if (help.classList.contains("show")) { if (e.key === "Escape" || e.key === "?") help.classList.remove("show"); e.preventDefault(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); return undo(); }
@@ -463,6 +518,7 @@ document.addEventListener("keydown", (e) => {
     case "x": case "Backspace": case "Delete": reject(); break;
     case "u": undo(); break;
     case "s": airdrop(); break;
+    case "p": if (canPublish) startPublish(); else toast("Publishing is not set up. See the README.", true); break;
     case "f": setFilter(null); break;
     case "+": case "=": resize(40); break;
     case "-": case "_": resize(-40); break;

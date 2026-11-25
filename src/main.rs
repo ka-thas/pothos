@@ -1,4 +1,5 @@
 mod exif;
+mod publish;
 
 use axum::{
     extract::{Query, State},
@@ -18,6 +19,7 @@ use tokio::sync::Mutex;
 
 const INDEX: &str = include_str!("../web/index.html");
 const AIRDROP_HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/airdrop-helper"));
+const PUBLISH_HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/publish-helper"));
 const SIDECAR: &str = ".pothos.json";
 const REJECT_DIR: &str = "_rejected";
 const COLORS: [&str; 5] = ["red", "yellow", "green", "blue", "purple"];
@@ -36,6 +38,9 @@ struct App {
     /// Reject batches: (folder relative to root, file names).
     undo: Mutex<Vec<(String, Vec<String>)>>,
     helper: Option<PathBuf>,
+    publish_helper: Option<PathBuf>,
+    /// Held while publishing, so two publishes never run at once.
+    publishing: Mutex<()>,
 }
 type S = State<Arc<App>>;
 
@@ -177,7 +182,8 @@ async fn list(State(app): S, Query(q): Query<DirQuery>) -> R {
         .collect();
     let root = app.dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
     Ok(Json(json!({
-        "root": root, "items": items, "folders": folders, "colors": COLORS, "airdrop": app.helper.is_some()
+        "root": root, "items": items, "folders": folders, "colors": COLORS, "airdrop": app.helper.is_some(),
+        "publish": app.publish_helper.is_some() && publish::config_path().exists()
     }))
     .into_response())
 }
@@ -331,15 +337,34 @@ async fn airdrop(State(app): S, Json(r): Json<NamesReq>) -> R {
     Ok(Json(json!({ "ok": true, "count": paths.len() })).into_response())
 }
 
-/// Writes the embedded Swift helper to a temp file so the binary stays self-contained.
-fn install_helper() -> Option<PathBuf> {
-    if AIRDROP_HELPER.is_empty() {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishReq {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Publishes every green photo under the root (all subfolders) to the R2 bucket.
+async fn publish(State(app): S, Json(r): Json<PublishReq>) -> R {
+    let Some(helper) = &app.publish_helper else {
+        return Err(bad("Publishing is only available on macOS"));
+    };
+    let Ok(_guard) = app.publishing.try_lock() else {
+        return Err(bad("Already publishing"));
+    };
+    let out = publish::run(&app.dir, helper, r.dry_run).await.map_err(bad)?;
+    Ok(Json(out).into_response())
+}
+
+/// Writes an embedded Swift helper to a temp file so the binary stays self-contained.
+fn install_helper(name: &str, bytes: &[u8]) -> Option<PathBuf> {
+    if bytes.is_empty() {
         return None;
     }
-    let p = std::env::temp_dir().join(format!("pothos-airdrop-{}", env!("CARGO_PKG_VERSION")));
-    let same = std::fs::read(&p).map(|b| b == AIRDROP_HELPER).unwrap_or(false);
+    let p = std::env::temp_dir().join(format!("pothos-{name}-{}", env!("CARGO_PKG_VERSION")));
+    let same = std::fs::read(&p).map(|b| b == bytes).unwrap_or(false);
     if !same {
-        std::fs::write(&p, AIRDROP_HELPER).ok()?;
+        std::fs::write(&p, bytes).ok()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -374,7 +399,9 @@ async fn main() {
         dir: dir.clone(),
         side: Mutex::new(()),
         undo: Mutex::new(vec![]),
-        helper: install_helper(),
+        helper: install_helper("airdrop", AIRDROP_HELPER),
+        publish_helper: install_helper("publish", PUBLISH_HELPER),
+        publishing: Mutex::new(()),
     });
 
     let router = Router::new()
@@ -386,6 +413,7 @@ async fn main() {
         .route("/api/reject", post(reject))
         .route("/api/undo", post(undo))
         .route("/api/airdrop", post(airdrop))
+        .route("/api/publish", post(publish))
         .with_state(app);
 
     // Localhost only: nothing is exposed to the network.
