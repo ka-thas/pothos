@@ -13,7 +13,6 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::UNIX_EPOCH,
 };
 use tokio::sync::Mutex;
 
@@ -91,11 +90,20 @@ fn safe(dir: &Path, name: &str) -> Result<PathBuf, (StatusCode, String)> {
     Ok(p)
 }
 
+/// Cache-busting version for image URLs. Uses the change time, not the modified time:
+/// rotation keeps the modified time (the only capture time a camera without EXIF leaves),
+/// but every rewrite or rename still bumps the change time.
 fn version(p: &Path) -> String {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
+    let Ok(m) = std::fs::metadata(p) else { return String::new() };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}{:09}", m.ctime(), m.ctime_nsec())
+    }
+    #[cfg(not(unix))]
+    m.modified()
         .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos().to_string())
         .unwrap_or_default()
 }
@@ -209,9 +217,12 @@ async fn rotate(State(app): S, Json(r): Json<RotateReq>) -> R {
     for name in r.names {
         let p = safe(&d, &name)?;
         let data = tokio::fs::read(&p).await.map_err(bad)?;
+        let taken = std::fs::metadata(&p).and_then(|m| m.modified()).map_err(bad)?;
         let rotated = exif::rotate(&data, r.cw).map_err(|e| bad(format!("{name}: {e}")))?;
         let tmp = p.with_file_name(format!(".{name}.pothos.tmp"));
         tokio::fs::write(&tmp, rotated).await.map_err(bad)?;
+        // Keep the original modified time: it is the capture time for cameras without EXIF dates.
+        std::fs::File::options().write(true).open(&tmp).and_then(|f| f.set_modified(taken)).map_err(bad)?;
         tokio::fs::rename(&tmp, &p).await.map_err(bad)?;
         out.insert(name, version(&p));
     }

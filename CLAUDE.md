@@ -31,7 +31,7 @@ For a quick check without a browser, run with `--no-open` and hit the API with c
 ## API (all JSON, localhost only)
 Every call takes `dir`, the folder relative to the root (`""` is the root, `day1/morning` a subfolder).
 - `GET /` UI, `GET /api/list?dir=` -> `{root, items:[{name, v, tags}], folders:[{name, photos, folders, cover:{name, v}|null}], colors, airdrop}`
-- `GET /img?dir=&name=&v=` image bytes. Cached forever: `v` is the mtime in nanos and busts the cache.
+- `GET /img?dir=&name=&v=` image bytes. Cached forever: `v` is the file's change time (ctime) in nanos and busts the cache.
 - `POST /api/rotate {dir, names, cw}` -> `{name: newVersion}`
 - `POST /api/tag {dir, names, color|null}` toggles a color for the whole batch (removes it if all have it, otherwise adds it); `null` clears tags
 - `POST /api/reject {dir, names}` moves files to `<dir>/_rejected/`, `POST /api/undo` moves the last batch back and returns `{dir, names}`
@@ -40,6 +40,7 @@ Every call takes `dir`, the folder relative to the root (`""` is the root, `day1
 ## Design rules (keep these)
 - **Rotation must stay lossless.** Only the EXIF Orientation tag (0x0112) changes, and pixel data is never re-encoded. If the tag is missing from an existing EXIF block, a copy of IFD0 with the new entry is appended and the header repointed, so no existing offsets move. No EXIF means a minimal APP1 is inserted (after JFIF APP0 if present).
 - **Writes are atomic**: write a temp file, then rename (images and sidecar).
+- **Keep the modified time on rotation.** Cameras like the Charmera write no EXIF, so the file's modified time is the only capture time. Image URL versions use the change time instead.
 - **Tags are NOT macOS Finder tags.** Each folder has its own `<folder>/.pothos.json` as `{ "tags": { "file.jpg": ["red", ...] } }`, keyed by file name.
 - **Fixed tag set**: `red, yellow, green, blue, purple` (keys 1 to 5). The order in `COLORS` in main.rs is the source of truth and is sent to the UI.
 - **Subfolders**: browsed one at a time (folder tiles first, then photos), never flattened. The UI keeps the folder in the URL hash. `_rejected` and dot folders are hidden and cannot be opened.
