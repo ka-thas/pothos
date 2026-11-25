@@ -24,6 +24,7 @@ Alternatively run `pothos` from within the folder with your pictures.
 
 ## Shortcuts (press ? in the app)
 - Move: arrows or H J K L, G / Shift+G first/last, Enter open, Esc back
+- Folders: subfolders show as tiles first. Enter opens one, Esc (or Cmd+Up) goes back up
 - Rotate: R right, Shift+R left
 - Tags: 1-5 toggle red/yellow/green/blue/purple, 0 clear
 - Filter: Shift+1-5 one color, Shift+0 untagged, F all
@@ -33,6 +34,7 @@ Alternatively run `pothos` from within the folder with your pictures.
 - Grid size: + / -
 
 Edits apply to marked photos if any, otherwise the current one.
+Each folder keeps its own `.pothos.json` and `_rejected/`. pothos never goes above the folder you start it on.
 The server only listens on 127.0.0.1.
 
 ## License

@@ -1,7 +1,7 @@
 mod exif;
 
 use axum::{
-    extract::{Path as UrlPath, State},
+    extract::{Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -30,9 +30,12 @@ struct Sidecar {
 }
 
 struct App {
+    /// The folder pothos was started on. Subfolders are browsed relative to it and never above it.
     dir: PathBuf,
-    side: Mutex<Sidecar>,
-    undo: Mutex<Vec<Vec<String>>>,
+    /// Serializes sidecar read-modify-write. Each folder has its own `.pothos.json`.
+    side: Mutex<()>,
+    /// Reject batches: (folder relative to root, file names).
+    undo: Mutex<Vec<(String, Vec<String>)>>,
     helper: Option<PathBuf>,
 }
 type S = State<Arc<App>>;
@@ -48,6 +51,9 @@ type R = Result<Response, (StatusCode, String)>;
 fn bad(e: impl ToString) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
+fn not_found(what: &str) -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, format!("{what} not found"))
+}
 
 fn is_image(p: &Path) -> bool {
     matches!(
@@ -56,14 +62,31 @@ fn is_image(p: &Path) -> bool {
     )
 }
 
+/// Resolves a folder given relative to the root, like `day1/morning`.
+/// Only plain names (no dotfiles, no `..`, not `_rejected`), and it must stay inside the root.
+fn folder(app: &App, dir: &str) -> Result<PathBuf, (StatusCode, String)> {
+    let mut p = app.dir.clone();
+    for c in dir.split('/').filter(|c| !c.is_empty()) {
+        if c.starts_with('.') || c.contains('\\') || c == REJECT_DIR {
+            return Err(bad("bad folder"));
+        }
+        p.push(c);
+    }
+    let p = p.canonicalize().map_err(|_| not_found(dir))?;
+    if !p.starts_with(&app.dir) || !p.is_dir() {
+        return Err(not_found(dir));
+    }
+    Ok(p)
+}
+
 /// Only plain file names in the folder are allowed (no paths, no dotfiles).
-fn safe(app: &App, name: &str) -> Result<PathBuf, (StatusCode, String)> {
+fn safe(dir: &Path, name: &str) -> Result<PathBuf, (StatusCode, String)> {
     if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
         return Err(bad("bad name"));
     }
-    let p = app.dir.join(name);
+    let p = dir.join(name);
     if !p.is_file() || !is_image(&p) {
-        return Err((StatusCode::NOT_FOUND, format!("{name} not found")));
+        return Err(not_found(name));
     }
     Ok(p)
 }
@@ -77,43 +100,89 @@ fn version(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn save_sidecar(app: &App, s: &Sidecar) -> std::io::Result<()> {
-    let tmp = app.dir.join(".pothos.json.tmp");
+/// Visible entry names in a folder matching `keep`, sorted case-insensitively.
+fn entries(dir: &Path, keep: impl Fn(&Path, &str) -> bool) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            (!name.starts_with('.') && keep(&e.path(), &name)).then_some(name)
+        })
+        .collect();
+    v.sort_by_key(|n| n.to_lowercase());
+    v
+}
+fn photos(dir: &Path) -> Vec<String> {
+    entries(dir, |p, _| p.is_file() && is_image(p))
+}
+fn subfolders(dir: &Path) -> Vec<String> {
+    entries(dir, |p, n| p.is_dir() && n != REJECT_DIR)
+}
+
+fn load_sidecar(dir: &Path) -> Sidecar {
+    std::fs::read(dir.join(SIDECAR))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_sidecar(dir: &Path, s: &Sidecar) -> std::io::Result<()> {
+    let tmp = dir.join(".pothos.json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(s)?)?;
-    std::fs::rename(tmp, app.dir.join(SIDECAR))
+    std::fs::rename(tmp, dir.join(SIDECAR))
 }
 
 async fn index() -> Html<&'static str> {
     Html(INDEX)
 }
 
-async fn list(State(app): S) -> R {
-    let side = app.side.lock().await;
-    let mut items: Vec<Item> = std::fs::read_dir(&app.dir)
-        .map_err(bad)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && is_image(p))
-        .filter_map(|p| {
-            let name = p.file_name()?.to_str()?.to_string();
-            if name.starts_with('.') {
-                return None;
-            }
-            Some(Item {
-                tags: side.tags.get(&name).cloned().unwrap_or_default(),
-                v: version(&p),
-                name,
-            })
-        })
-        .collect();
-    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    let folder = app.dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-    Ok(Json(json!({ "folder": folder, "items": items, "colors": COLORS, "airdrop": app.helper.is_some() }))
-        .into_response())
+#[derive(Deserialize)]
+struct DirQuery {
+    #[serde(default)]
+    dir: String,
 }
 
-async fn image(State(app): S, UrlPath(name): UrlPath<String>) -> R {
-    let p = safe(&app, &name)?;
+async fn list(State(app): S, Query(q): Query<DirQuery>) -> R {
+    let d = folder(&app, &q.dir)?;
+    let side = {
+        let _guard = app.side.lock().await;
+        load_sidecar(&d)
+    };
+    let items: Vec<Item> = photos(&d)
+        .into_iter()
+        .map(|name| Item {
+            tags: side.tags.get(&name).cloned().unwrap_or_default(),
+            v: version(&d.join(&name)),
+            name,
+        })
+        .collect();
+    let folders: Vec<_> = subfolders(&d)
+        .into_iter()
+        .map(|name| {
+            let p = d.join(&name);
+            let ph = photos(&p);
+            let cover = ph.first().map(|c| json!({ "name": c, "v": version(&p.join(c)) }));
+            json!({ "name": name, "photos": ph.len(), "folders": subfolders(&p).len(), "cover": cover })
+        })
+        .collect();
+    let root = app.dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    Ok(Json(json!({
+        "root": root, "items": items, "folders": folders, "colors": COLORS, "airdrop": app.helper.is_some()
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct ImageQuery {
+    #[serde(default)]
+    dir: String,
+    name: String,
+}
+
+async fn image(State(app): S, Query(q): Query<ImageQuery>) -> R {
+    let p = safe(&folder(&app, &q.dir)?, &q.name)?;
     let bytes = tokio::fs::read(&p).await.map_err(bad)?;
     Ok((
         [
@@ -128,14 +197,17 @@ async fn image(State(app): S, UrlPath(name): UrlPath<String>) -> R {
 
 #[derive(Deserialize)]
 struct RotateReq {
+    #[serde(default)]
+    dir: String,
     names: Vec<String>,
     cw: bool,
 }
 
 async fn rotate(State(app): S, Json(r): Json<RotateReq>) -> R {
+    let d = folder(&app, &r.dir)?;
     let mut out = BTreeMap::new();
     for name in r.names {
-        let p = safe(&app, &name)?;
+        let p = safe(&d, &name)?;
         let data = tokio::fs::read(&p).await.map_err(bad)?;
         let rotated = exif::rotate(&data, r.cw).map_err(|e| bad(format!("{name}: {e}")))?;
         let tmp = p.with_file_name(format!(".{name}.pothos.tmp"));
@@ -148,15 +220,19 @@ async fn rotate(State(app): S, Json(r): Json<RotateReq>) -> R {
 
 #[derive(Deserialize)]
 struct TagReq {
+    #[serde(default)]
+    dir: String,
     names: Vec<String>,
     /// A color to toggle, or null to clear all tags.
     color: Option<String>,
 }
 
 async fn tag(State(app): S, Json(r): Json<TagReq>) -> R {
-    let mut side = app.side.lock().await;
+    let d = folder(&app, &r.dir)?;
+    let _guard = app.side.lock().await;
+    let mut side = load_sidecar(&d);
     for n in &r.names {
-        safe(&app, n)?;
+        safe(&d, n)?;
     }
     match &r.color {
         None => {
@@ -183,7 +259,7 @@ async fn tag(State(app): S, Json(r): Json<TagReq>) -> R {
             }
         }
     }
-    save_sidecar(&app, &side).map_err(bad)?;
+    save_sidecar(&d, &side).map_err(bad)?;
     let out: BTreeMap<_, _> = r
         .names
         .iter()
@@ -194,43 +270,48 @@ async fn tag(State(app): S, Json(r): Json<TagReq>) -> R {
 
 #[derive(Deserialize)]
 struct NamesReq {
+    #[serde(default)]
+    dir: String,
     names: Vec<String>,
 }
 
 async fn reject(State(app): S, Json(r): Json<NamesReq>) -> R {
-    let dest = app.dir.join(REJECT_DIR);
+    let d = folder(&app, &r.dir)?;
+    let dest = d.join(REJECT_DIR);
     tokio::fs::create_dir_all(&dest).await.map_err(bad)?;
     let mut moved = vec![];
     for name in r.names {
-        let p = safe(&app, &name)?;
+        let p = safe(&d, &name)?;
         if dest.join(&name).exists() {
             return Err(bad(format!("{name} already in {REJECT_DIR}")));
         }
         tokio::fs::rename(&p, dest.join(&name)).await.map_err(bad)?;
         moved.push(name);
     }
-    app.undo.lock().await.push(moved.clone());
+    app.undo.lock().await.push((r.dir, moved.clone()));
     Ok(Json(moved).into_response())
 }
 
 async fn undo(State(app): S) -> R {
-    let Some(batch) = app.undo.lock().await.pop() else {
-        return Ok(Json(Vec::<String>::new()).into_response());
+    let Some((dir, batch)) = app.undo.lock().await.pop() else {
+        return Ok(Json(json!({ "dir": "", "names": [] })).into_response());
     };
-    let src = app.dir.join(REJECT_DIR);
+    let d = folder(&app, &dir)?;
+    let src = d.join(REJECT_DIR);
     for name in &batch {
-        tokio::fs::rename(src.join(name), app.dir.join(name)).await.map_err(bad)?;
+        tokio::fs::rename(src.join(name), d.join(name)).await.map_err(bad)?;
     }
-    Ok(Json(batch).into_response())
+    Ok(Json(json!({ "dir": dir, "names": batch })).into_response())
 }
 
 async fn airdrop(State(app): S, Json(r): Json<NamesReq>) -> R {
     let Some(helper) = &app.helper else {
         return Err(bad("AirDrop is only available on macOS"));
     };
+    let d = folder(&app, &r.dir)?;
     let mut paths = vec![];
     for n in &r.names {
-        paths.push(safe(&app, n)?);
+        paths.push(safe(&d, n)?);
     }
     let mut child = tokio::process::Command::new(helper).args(&paths).spawn().map_err(bad)?;
     tokio::spawn(async move {
@@ -278,14 +359,9 @@ async fn main() {
         .unwrap_or_else(|| std::env::current_dir().unwrap())
         .canonicalize()
         .expect("folder not found");
-    let side = std::fs::read(dir.join(SIDECAR))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-
     let app = Arc::new(App {
         dir: dir.clone(),
-        side: Mutex::new(side),
+        side: Mutex::new(()),
         undo: Mutex::new(vec![]),
         helper: install_helper(),
     });
@@ -293,7 +369,7 @@ async fn main() {
     let router = Router::new()
         .route("/", get(index))
         .route("/api/list", get(list))
-        .route("/img/{name}", get(image))
+        .route("/img", get(image))
         .route("/api/rotate", post(rotate))
         .route("/api/tag", post(tag))
         .route("/api/reject", post(reject))

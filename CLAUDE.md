@@ -1,6 +1,6 @@
 # pothos
 
-Keyboard-driven photo culling tool for a single folder of small JPGs (around 150 KB each) on macOS.
+Keyboard-driven photo culling tool for a folder of small JPGs (around 150 KB each) and its subfolders, on macOS.
 It's one Rust binary that serves a local web UI. Sharing to an iPhone goes through AirDrop.
 
 ## Stack
@@ -29,19 +29,21 @@ pothos <folder> [--port 8787] [--no-open]
 For a quick check without a browser, run with `--no-open` and hit the API with curl.
 
 ## API (all JSON, localhost only)
-- `GET /` UI, `GET /api/list` -> `{folder, items:[{name, v, tags}], colors, airdrop}`
-- `GET /img/{name}` image bytes. Cached forever: the UI appends `?v=<mtime nanos>` to bust the cache.
-- `POST /api/rotate {names, cw}` -> `{name: newVersion}`
-- `POST /api/tag {names, color|null}` toggles a color for the whole batch (removes it if all have it, otherwise adds it); `null` clears tags
-- `POST /api/reject {names}` moves files to `_rejected/`, `POST /api/undo` moves the last batch back
-- `POST /api/airdrop {names}` spawns the helper without waiting for it
+Every call takes `dir`, the folder relative to the root (`""` is the root, `day1/morning` a subfolder).
+- `GET /` UI, `GET /api/list?dir=` -> `{root, items:[{name, v, tags}], folders:[{name, photos, folders, cover:{name, v}|null}], colors, airdrop}`
+- `GET /img?dir=&name=&v=` image bytes. Cached forever: `v` is the mtime in nanos and busts the cache.
+- `POST /api/rotate {dir, names, cw}` -> `{name: newVersion}`
+- `POST /api/tag {dir, names, color|null}` toggles a color for the whole batch (removes it if all have it, otherwise adds it); `null` clears tags
+- `POST /api/reject {dir, names}` moves files to `<dir>/_rejected/`, `POST /api/undo` moves the last batch back and returns `{dir, names}`
+- `POST /api/airdrop {dir, names}` spawns the helper without waiting for it
 
 ## Design rules (keep these)
 - **Rotation must stay lossless.** Only the EXIF Orientation tag (0x0112) changes, and pixel data is never re-encoded. If the tag is missing from an existing EXIF block, a copy of IFD0 with the new entry is appended and the header repointed, so no existing offsets move. No EXIF means a minimal APP1 is inserted (after JFIF APP0 if present).
 - **Writes are atomic**: write a temp file, then rename (images and sidecar).
-- **Tags are NOT macOS Finder tags.** They live in `<folder>/.pothos.json` as `{ "tags": { "file.jpg": ["red", ...] } }`, keyed by file name.
+- **Tags are NOT macOS Finder tags.** Each folder has its own `<folder>/.pothos.json` as `{ "tags": { "file.jpg": ["red", ...] } }`, keyed by file name.
 - **Fixed tag set**: `red, yellow, green, blue, purple` (keys 1 to 5). The order in `COLORS` in main.rs is the source of truth and is sent to the UI.
-- **Security**: bind to 127.0.0.1 only. `safe()` accepts only plain file names (no paths, no dotfiles, must be an existing jpg/jpeg in the folder). Run every name from the client through it.
+- **Subfolders**: browsed one at a time (folder tiles first, then photos), never flattened. The UI keeps the folder in the URL hash. `_rejected` and dot folders are hidden and cannot be opened.
+- **Security**: bind to 127.0.0.1 only. `folder()` resolves `dir` to a canonical path that must stay inside the root (plain names only, no `..`, no dotfiles, not `_rejected`). `safe()` accepts only plain file names (no paths, no dotfiles, must be an existing jpg/jpeg in the folder). Run every name from the client through it.
 - **Batch semantics**: the UI applies actions to marked photos if any, otherwise to the current one.
 - **Keyboard first**: every feature needs a shortcut, and the help overlay (`?`) must list it. Avoid layout-dependent keys; use `e.code` for Shift+digit.
 - Keep it small and dependency-light. Prefer extending `index.html` over adding a build step.

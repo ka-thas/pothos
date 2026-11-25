@@ -18,7 +18,10 @@
 
   header { display: flex; align-items: center; gap: 14px; padding: 8px 14px;
     border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
-  header .folder { font-weight: 600; }
+  header .folder { font-weight: 600; display: flex; align-items: baseline; min-width: 0; }
+  header .folder .sep { color: var(--dim); margin: 0 6px; font-weight: 400; }
+  header .folder .link { color: var(--dim); cursor: pointer; }
+  header .folder .link:hover { color: var(--text); }
   header .stat { color: var(--dim); font-variant-numeric: tabular-nums; }
   header .spacer { flex: 1; }
   header .filters { display: flex; gap: 6px; }
@@ -49,6 +52,14 @@
   .cell .check { position: absolute; top: 6px; left: 6px; width: 18px; height: 18px; border-radius: 50%;
     background: var(--blue); color: #fff; font-size: 12px; display: none; place-items: center; }
   .cell.marked .check { display: grid; }
+  .cell.folder img { opacity: .45; }
+  .cell.folder .ficon { position: absolute; top: 8px; left: 8px; width: 22px; height: 22px; color: var(--text);
+    filter: drop-shadow(0 1px 2px #000a); }
+  .cell.folder.nocover .ficon { position: static; width: 34%; height: 34%; color: var(--dim); filter: none; }
+  .cell.folder .fname { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 10px; display: flex;
+    flex-direction: column; background: linear-gradient(transparent, #000c); }
+  .cell.folder .fname b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell.folder .fcount { font-size: 11px; color: var(--dim); }
 
   #single { position: absolute; inset: 0; display: none; background: #000; }
   #single.show { display: block; }
@@ -99,7 +110,8 @@
 <div id="help"><div class="box">
   <div class="sec"><h3>Navigate</h3>
     <div class="row"><span>Move</span><span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> or <kbd>H</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd></span></div>
-    <div class="row"><span>Open / back to grid</span><span><kbd>Enter</kbd> <kbd>Esc</kbd></span></div>
+    <div class="row"><span>Open photo or folder / back to grid</span><span><kbd>Enter</kbd> <kbd>Esc</kbd></span></div>
+    <div class="row"><span>Parent folder</span><span><kbd>Esc</kbd> or <kbd>⌘↑</kbd></span></div>
     <div class="row"><span>First / last</span><span><kbd>G</kbd> <kbd>Shift</kbd>+<kbd>G</kbd></span></div>
     <div class="row"><span>Bigger / smaller grid</span><span><kbd>+</kbd> <kbd>−</kbd></span></div>
   </div>
@@ -114,7 +126,7 @@
     <div class="row"><span>Mark / unmark</span><span><kbd>Space</kbd></span></div>
     <div class="row"><span>Mark and move</span><span><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></span></div>
     <div class="row"><span>Mark all visible</span><span><kbd>A</kbd></span></div>
-    <div class="row"><span>Clear marks</span><span><kbd>Esc</kbd> (in grid)</span></div>
+    <div class="row"><span>Clear marks</span><span><kbd>Esc</kbd> (in grid, before going up)</span></div>
     <div class="row"><span>Edits apply to marked, else current</span><span></span></div>
   </div>
   <div class="sec"><h3>Filter and share</h3>
@@ -129,17 +141,29 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let COLORS = ["red", "yellow", "green", "blue", "purple"];
+let root = "";           // name of the folder pothos was started on
+let dir = "";            // current folder relative to root, "" is the root
+let folders = [];        // [{name, photos, folders, cover: {name, v} | null}]
 let items = [];          // [{name, v, tags}]
-let cur = null;          // current item name
-let marked = new Set();  // marked names
+let cur = null;          // current key: a photo name, or "/" + folder name
+let marked = new Set();  // marked photo names
 let filter = null;       // null | color | "untagged"
 let view = "grid";
 let cellSize = 190;
-const cells = new Map(); // name -> element
+let nextCur = null;      // key to select once the next folder listing arrives
+const cells = new Map(); // key -> element
+
+const FOLDER_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2h8.4A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>`;
+const isDir = (k) => typeof k === "string" && k.startsWith("/");
+const join = (a, b) => (a ? a + "/" + b : b);
+const qs = (o) => new URLSearchParams(o).toString();
+const imgUrl = (d, name, v) => `/img?${qs({ dir: d, name, v })}`;
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 const visible = () => items.filter((it) =>
   filter === null ? true : filter === "untagged" ? it.tags.length === 0 : it.tags.includes(filter));
-const imgUrl = (it) => `/img/${encodeURIComponent(it.name)}?v=${it.v}`;
+// Everything in the grid, in order: folders first, then photos.
+const entries = () => [...folders.map((f) => "/" + f.name), ...visible().map((i) => i.name)];
 
 let toastTimer;
 function toast(msg, err = false) {
@@ -156,16 +180,49 @@ async function api(path, body) {
 }
 
 async function load() {
-  const d = await api("/api/list");
-  COLORS = d.colors;
-  items = d.items;
-  $("folder").textContent = d.folder;
-  document.title = d.folder + " · pothos";
-  const names = new Set(items.map((i) => i.name));
-  marked = new Set([...marked].filter((n) => names.has(n)));
-  if (!cur || !names.has(cur)) cur = items[0]?.name ?? null;
-  buildFilters();
-  render();
+  const at = dir;
+  const d = await api("/api/list?" + qs({ dir }));
+  if (at !== dir) return; // the user moved to another folder meanwhile
+  COLORS = d.colors; root = d.root; items = d.items; folders = d.folders;
+  const keys = new Set([...folders.map((f) => "/" + f.name), ...items.map((i) => i.name)]);
+  marked = new Set([...marked].filter((n) => keys.has(n)));
+  if (nextCur && keys.has(nextCur)) cur = nextCur;
+  nextCur = null;
+  buildCrumbs(); buildFilters(); render();
+}
+
+// Folder navigation. The folder lives in the URL hash, so reload and browser back work.
+const hashDir = () => decodeURIComponent(location.hash.replace(/^#\/?/, "")).replace(/\/+$/, "");
+function go(d, select = null) {
+  nextCur = select;
+  if (hashDir() === d) openDir(d);
+  else location.hash = d ? "/" + d.split("/").map(encodeURIComponent).join("/") : "";
+}
+function openDir(d) {
+  const prev = dir;
+  dir = d;
+  // Coming back up: select the folder we came out of.
+  if (!nextCur && prev !== d && (d === "" || prev.startsWith(d + "/")))
+    nextCur = "/" + prev.slice(d ? d.length + 1 : 0).split("/")[0];
+  cells.forEach((el) => el.remove()); cells.clear();
+  marked.clear(); cur = null; view = "grid";
+  $("scroller").scrollTop = 0;
+  load().catch((e) => { toast(e.message, true); if (dir) go(""); });
+}
+const enter = (key) => go(join(dir, key.slice(1)));
+const up = () => { if (dir) go(dir.split("/").slice(0, -1).join("/")); };
+window.addEventListener("hashchange", () => openDir(hashDir()));
+
+function buildCrumbs() {
+  const c = $("folder"); c.innerHTML = "";
+  const parts = dir ? dir.split("/") : [];
+  [root, ...parts].forEach((name, i) => {
+    if (i) c.append(Object.assign(document.createElement("span"), { className: "sep", textContent: "/" }));
+    const el = Object.assign(document.createElement("span"), { textContent: name });
+    if (i < parts.length) { el.className = "link"; el.onclick = () => go(parts.slice(0, i).join("/")); }
+    c.append(el);
+  });
+  document.title = (parts.at(-1) ?? root) + " · pothos";
 }
 
 function buildFilters() {
@@ -186,56 +243,85 @@ function dotsHtml(tags) {
   return tags.map((t) => `<span class="dot" style="background:var(--${t})"></span>`).join("");
 }
 
-function makeCell(it) {
+function makeCell(key) {
   const el = document.createElement("div");
-  el.className = "cell";
-  el.innerHTML = `<img loading="lazy" decoding="async" alt=""><span class="dots"></span><span class="check">✓</span><span class="name"></span>`;
-  el.onclick = (e) => {
-    if (e.metaKey || e.shiftKey) toggleMark(it.name); else { cur = it.name; render(); }
-  };
-  el.ondblclick = () => { cur = it.name; setView("single"); };
+  if (isDir(key)) {
+    el.className = "cell folder";
+    el.innerHTML = `<img loading="lazy" decoding="async" alt=""><span class="ficon">${FOLDER_SVG}</span><span class="fname"><b></b><span class="fcount"></span></span>`;
+    el.onclick = () => { cur = key; render(); };
+    el.ondblclick = () => enter(key);
+  } else {
+    el.className = "cell";
+    el.innerHTML = `<img loading="lazy" decoding="async" alt=""><span class="dots"></span><span class="check">✓</span><span class="name"></span>`;
+    el.onclick = (e) => {
+      if (e.metaKey || e.shiftKey) toggleMark(key); else { cur = key; render(); }
+    };
+    el.ondblclick = () => { cur = key; setView("single"); };
+  }
   return el;
+}
+
+function setSrc(img, src) { if (img.getAttribute("src") !== src) img.setAttribute("src", src); }
+
+function fillFolder(el, f) {
+  const img = el.querySelector("img");
+  if (f.cover) setSrc(img, imgUrl(join(dir, f.name), f.cover.name, f.cover.v));
+  img.hidden = !f.cover;
+  el.classList.toggle("nocover", !f.cover);
+  el.querySelector("b").textContent = f.name;
+  const parts = [f.folders && plural(f.folders, "folder"), (f.photos || !f.folders) && plural(f.photos, "photo")];
+  el.querySelector(".fcount").textContent = parts.filter(Boolean).join(" · ");
+}
+
+function fillPhoto(el, it) {
+  setSrc(el.querySelector("img"), imgUrl(dir, it.name, it.v));
+  el.querySelector(".dots").innerHTML = dotsHtml(it.tags);
+  el.querySelector(".name").textContent = it.name;
+  el.classList.toggle("marked", marked.has(it.name));
 }
 
 function render() {
   const vis = visible();
-  if (cur && !vis.some((i) => i.name === cur)) cur = vis[0]?.name ?? null;
+  const keys = entries();
+  if (!keys.includes(cur)) cur = keys[0] ?? null;
+  if (view === "single" && (!cur || isDir(cur))) view = "grid";
   const grid = $("grid");
   grid.style.setProperty("--cell", cellSize + "px");
-  const keep = new Set(vis.map((i) => i.name));
-  for (const [n, el] of cells) if (!keep.has(n) || !items.some((i) => i.name === n)) { el.remove(); if (!items.some((i) => i.name === n)) cells.delete(n); }
-  for (const it of vis) {
-    let el = cells.get(it.name);
-    if (!el) { el = makeCell(it); cells.set(it.name, el); }
-    const img = el.querySelector("img"); const src = imgUrl(it);
-    if (img.getAttribute("src") !== src) img.setAttribute("src", src);
-    el.querySelector(".dots").innerHTML = dotsHtml(it.tags);
-    el.querySelector(".name").textContent = it.name;
-    el.classList.toggle("cur", it.name === cur);
-    el.classList.toggle("marked", marked.has(it.name));
+  const byName = new Map(items.map((i) => [i.name, i]));
+  const byKey = new Map(folders.map((f) => ["/" + f.name, f]));
+  const shown = new Set(keys);
+  for (const [k, el] of cells) if (!shown.has(k)) {
+    el.remove(); // hidden by the filter, or gone
+    if (!byName.has(k) && !byKey.has(k)) cells.delete(k);
+  }
+  for (const k of keys) {
+    let el = cells.get(k);
+    if (!el) { el = makeCell(k); cells.set(k, el); }
+    if (isDir(k)) fillFolder(el, byKey.get(k)); else fillPhoto(el, byName.get(k));
+    el.classList.toggle("cur", k === cur);
     grid.appendChild(el); // keeps order; moves existing nodes
   }
   let empty = grid.querySelector(".empty");
-  if (!vis.length) { if (!empty) { empty = document.createElement("div"); empty.className = "empty"; grid.append(empty); }
+  if (!keys.length) { if (!empty) { empty = document.createElement("div"); empty.className = "empty"; grid.append(empty); }
     empty.textContent = items.length ? "No photos match this filter. Press F to show all." : "No JPG files in this folder."; }
   else if (empty) empty.remove();
 
-  $("count").textContent = `${vis.length}${filter ? " / " + items.length : ""} photos`;
+  $("count").textContent = (folders.length ? plural(folders.length, "folder") + " · " : "")
+    + `${vis.length}${filter ? " / " + items.length : ""} photos`;
   $("markedCount").textContent = marked.size ? `${marked.size} marked` : "";
   buildFilters();
 
-  const it = vis.find((i) => i.name === cur);
-  $("single").classList.toggle("show", view === "single" && !!it);
-  if (view === "single" && it) {
-    const src = imgUrl(it);
-    if ($("big").getAttribute("src") !== src) $("big").setAttribute("src", src);
+  const it = view === "single" ? byName.get(cur) : null;
+  $("single").classList.toggle("show", !!it);
+  if (it) {
+    setSrc($("big"), imgUrl(dir, it.name, it.v));
     $("sname").textContent = it.name;
     $("sdots").innerHTML = dotsHtml(it.tags);
     $("single").classList.toggle("marked", marked.has(it.name));
-    $("spos").textContent = `${vis.indexOf(it) + 1} / ${vis.length}`;
     const i = vis.indexOf(it);
-    [vis[i + 1], vis[i - 1]].forEach((n) => { if (n) new Image().src = imgUrl(n); });
-  } else if (it) {
+    $("spos").textContent = `${i + 1} / ${vis.length}`;
+    [vis[i + 1], vis[i - 1]].forEach((n) => { if (n) new Image().src = imgUrl(dir, n.name, n.v); });
+  } else if (cur) {
     cells.get(cur)?.scrollIntoView({ block: "nearest" });
   }
 }
@@ -265,67 +351,77 @@ function columns() {
 }
 
 function move(delta) {
-  const vis = visible(); if (!vis.length) return;
-  const i = Math.max(0, vis.findIndex((x) => x.name === cur));
-  const j = Math.min(vis.length - 1, Math.max(0, i + delta));
-  cur = vis[j].name; render();
+  // The single view steps through photos only; the grid also walks over folders.
+  const list = view === "single" ? visible().map((i) => i.name) : entries();
+  if (!list.length) return;
+  const i = Math.max(0, list.indexOf(cur));
+  cur = list[Math.min(list.length - 1, Math.max(0, i + delta))]; render();
 }
 
 function targets() {
   const vis = new Set(visible().map((i) => i.name));
   const m = [...marked].filter((n) => vis.has(n));
-  return m.length ? m : cur ? [cur] : [];
+  return m.length ? m : cur && !isDir(cur) ? [cur] : [];
 }
 
 function toggleMark(name) {
+  if (!name || isDir(name)) return;
   marked.has(name) ? marked.delete(name) : marked.add(name); render();
 }
+function markCur() { if (cur && !isDir(cur)) marked.add(cur); }
 
 async function rotate(cw) {
-  const names = targets(); if (!names.length) return;
+  const names = targets(), d = dir; if (!names.length) return;
   try {
-    const res = await api("/api/rotate", { names, cw });
+    const res = await api("/api/rotate", { dir: d, names, cw });
+    if (d !== dir) return;
     for (const it of items) if (res[it.name]) it.v = res[it.name];
     render();
   } catch (e) { toast(e.message, true); }
 }
 
 async function tag(color) {
-  const names = targets(); if (!names.length) return;
+  const names = targets(), d = dir; if (!names.length) return;
   try {
-    const res = await api("/api/tag", { names, color });
+    const res = await api("/api/tag", { dir: d, names, color });
+    if (d !== dir) return;
     for (const it of items) if (res[it.name]) it.tags = res[it.name];
     render();
   } catch (e) { toast(e.message, true); }
 }
 
 async function reject() {
-  const names = targets(); if (!names.length) return;
+  const names = targets(), d = dir; if (!names.length) return;
   const vis = visible();
-  const after = vis.slice(vis.findIndex((i) => i.name === cur)).find((i) => !names.includes(i.name))
+  const start = Math.max(0, vis.findIndex((i) => i.name === cur));
+  const after = vis.slice(start).find((i) => !names.includes(i.name))
     ?? [...vis].reverse().find((i) => !names.includes(i.name));
   try {
-    await api("/api/reject", { names });
+    await api("/api/reject", { dir: d, names });
+    toast(`Rejected ${names.length} · U to undo`);
+    if (d !== dir) return;
     names.forEach((n) => { marked.delete(n); cells.get(n)?.remove(); cells.delete(n); });
     items = items.filter((i) => !names.includes(i.name));
-    cur = after?.name ?? null;
-    render(); toast(`Rejected ${names.length} · U to undo`);
+    if (!isDir(cur)) cur = after?.name ?? null;
+    render();
   } catch (e) { toast(e.message, true); }
 }
 
 async function undo() {
   try {
-    const back = await api("/api/undo", {});
-    if (!back.length) return toast("Nothing to undo");
-    await load(); cur = back[0]; render(); toast(`Restored ${back.length}`);
+    const r = await api("/api/undo", {});
+    if (!r.names.length) return toast("Nothing to undo");
+    toast(`Restored ${r.names.length}`);
+    if (r.dir !== dir) return go(r.dir, r.names[0]);
+    nextCur = r.names[0]; await load();
   } catch (e) { toast(e.message, true); }
 }
 
 async function airdrop() {
   const names = targets(); if (!names.length) return;
   try {
-    await api("/api/airdrop", { names });
-    toast(`AirDrop: ${names.length} photo${names.length > 1 ? "s" : ""}`);
+    await api("/api/airdrop", { dir, names });
+    toast(`AirDrop: ${plural(names.length, "photo")}`);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -333,6 +429,8 @@ document.addEventListener("keydown", (e) => {
   const help = $("help");
   if (help.classList.contains("show")) { if (e.key === "Escape" || e.key === "?") help.classList.remove("show"); e.preventDefault(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); return undo(); }
+  if (e.metaKey && e.key === "ArrowUp") { e.preventDefault(); return up(); }   // Finder style
+  if (e.metaKey && e.key === "ArrowDown") { e.preventDefault(); if (isDir(cur)) enter(cur); return; }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   const k = e.key, code = e.code, single = view === "single";
@@ -345,7 +443,7 @@ document.addEventListener("keydown", (e) => {
   } else if (digit !== null && digit <= 5) {
     tag(digit === 0 ? null : COLORS[digit - 1]);
   } else if (e.shiftKey && (k === "ArrowRight" || k === "ArrowLeft")) {
-    if (cur) marked.add(cur); move(k === "ArrowRight" ? 1 : -1); if (cur) marked.add(cur); render();
+    markCur(); move(k === "ArrowRight" ? 1 : -1); markCur(); render();
   } else switch (k) {
     case "ArrowRight": case "l": move(1); break;
     case "ArrowLeft": case "h": move(-1); break;
@@ -355,10 +453,10 @@ document.addEventListener("keydown", (e) => {
     case "G": move(Infinity); break;
     case "Home": move(-Infinity); break;
     case "End": move(Infinity); break;
-    case "Enter": setView(single ? "grid" : "single"); break;
+    case "Enter": if (!single && isDir(cur)) enter(cur); else setView(single ? "grid" : "single"); break;
     case "Escape":
-      if (single) setView("grid"); else if (marked.size) { marked.clear(); render(); } break;
-    case " ": if (cur) toggleMark(cur); break;
+      if (single) setView("grid"); else if (marked.size) { marked.clear(); render(); } else up(); break;
+    case " ": toggleMark(cur); break;
     case "a": visible().forEach((i) => marked.add(i.name)); render(); break;
     case "r": rotate(true); break;
     case "R": rotate(false); break;
@@ -375,8 +473,9 @@ document.addEventListener("keydown", (e) => {
 });
 
 $("help").onclick = () => $("help").classList.remove("show");
-window.addEventListener("focus", load); // pick up new files when you come back
-load().catch((e) => toast(e.message, true));
+window.addEventListener("focus", () => load().catch(() => {})); // pick up new files when you come back
+dir = hashDir();
+load().catch((e) => { toast(e.message, true); if (dir) go(""); });
 </script>
 </body>
 </html>
