@@ -143,8 +143,21 @@ struct Local {
     path: PathBuf,
     id: String,
     taken_at: String,
-    /// Content hash, only for green photos.
-    hash: Option<String>,
+    hash: String,
+    green: bool,
+}
+
+/// The file name part of an id and the content hash, like "pict0013-755dc370cef4". It stays the
+/// same when only a photo's time changes, so a re-timed photo replaces its old entry.
+fn same_photo_key(id: &str, hash: &str) -> Option<String> {
+    let name = id.splitn(3, '-').nth(2)?;
+    Some(format!("{name}-{hash}"))
+}
+
+/// The key of a manifest entry, with the hash taken from its file name.
+fn entry_key(p: &Map<String, Value>) -> Option<String> {
+    let stem = Path::new(str_of(p, "file")?).file_stem()?.to_str()?;
+    same_photo_key(str_of(p, "id")?, stem.rsplit_once('-')?.1)
 }
 
 #[derive(Default)]
@@ -176,24 +189,37 @@ fn plan(existing: &Value, locals: &[Local], trips: &[Trip]) -> Result<Plan, Stri
     };
     let old_by_id: HashMap<&str, &Map<String, Value>> =
         old.iter().filter_map(|p| Some((str_of(p, "id")?, p))).collect();
+    let old_by_key: HashMap<String, &Map<String, Value>> =
+        old.iter().filter_map(|p| Some((entry_key(p)?, p))).collect();
     let here: BTreeSet<&str> = locals.iter().map(|l| l.id.as_str()).collect();
+    let here_keys: BTreeSet<String> = locals.iter().filter_map(|l| same_photo_key(&l.id, &l.hash)).collect();
+    // An old entry is from this folder if its id or its name and contents match a photo here.
+    let is_here = |p: &Map<String, Value>| {
+        str_of(p, "id").is_some_and(|id| here.contains(id)) || entry_key(p).is_some_and(|k| here_keys.contains(&k))
+    };
     let mut out = Plan::default();
 
     for p in &old {
-        if !str_of(p, "id").is_some_and(|id| here.contains(id)) {
+        if !is_here(p) {
             out.photos.push(p.clone());
             out.kept_other += 1;
         }
     }
     let mut published = BTreeSet::new();
+    let mut published_keys = BTreeSet::new();
     for l in locals {
-        let Some(hash) = &l.hash else { continue };
+        if !l.green {
+            continue;
+        }
+        let hash = &l.hash;
         if !published.insert(l.id.as_str()) {
             out.warnings.push(format!("skipped {}: same time and name as another green photo", l.path.display()));
             continue;
         }
         let (file, thumb) = (format!("photos/{}-{hash}.jpg", l.id), format!("thumbs/{}-{hash}.jpg", l.id));
-        let prev = old_by_id.get(l.id.as_str());
+        let key = same_photo_key(&l.id, hash);
+        let prev = old_by_id.get(l.id.as_str()).or_else(|| key.as_ref().and_then(|k| old_by_key.get(k)));
+        published_keys.extend(key);
         let mut e = Map::new();
         e.insert("id".into(), json!(l.id));
         e.insert("file".into(), json!(file));
@@ -218,7 +244,12 @@ fn plan(existing: &Value, locals: &[Local], trips: &[Trip]) -> Result<Plan, Stri
         }
         out.photos.push(e);
     }
-    out.removed = old_by_id.keys().filter(|id| here.contains(*id) && !published.contains(*id)).count();
+    out.removed = old
+        .iter()
+        .filter(|p| is_here(p))
+        .filter(|p| !str_of(p, "id").is_some_and(|id| published.contains(id)))
+        .filter(|p| !entry_key(p).is_some_and(|k| published_keys.contains(&k)))
+        .count();
 
     for p in &mut out.photos {
         match str_of(p, "takenAt").and_then(|t| trip_for(t, trips)) {
@@ -326,12 +357,9 @@ pub async fn run(root: &Path, helper: &Path, dry_run: bool) -> Result<Value, Str
     let mut locals = vec![];
     for ((path, green), taken_at) in found.into_iter().zip(taken) {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        let hash = if green {
-            Some(content_hash(&std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?))
-        } else {
-            None
-        };
-        locals.push(Local { id: make_id(&taken_at, name), taken_at, hash, path });
+        // Every photo is hashed (they are small), so a re-timed photo is recognised even if not green.
+        let hash = content_hash(&std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+        locals.push(Local { id: make_id(&taken_at, name), taken_at, hash, green, path });
     }
 
     let tmp = TempDir(std::env::temp_dir().join(format!("pothos-publish-{}", std::process::id())));
@@ -425,7 +453,8 @@ mod tests {
             path: PathBuf::from(format!("/x/{id}.jpg")),
             id: id.into(),
             taken_at: format!("2026-11-{}T12:00:00+09:00", &id[..2]),
-            hash: green.map(String::from),
+            hash: green.unwrap_or("not-green").into(),
+            green: green.is_some(),
         }
     }
 
@@ -460,6 +489,33 @@ mod tests {
         assert_eq!(
             p.orphans,
             ["photos/21-edit-old.jpg", "photos/22-gone-ccc.jpg", "thumbs/21-edit-old.jpg", "thumbs/22-gone-ccc.jpg"]
+        );
+    }
+
+    #[test]
+    fn retimed_photo_replaces_its_old_entry() {
+        let existing = json!({ "photos": [
+            { "id": "21-120000-pict0013", "file": "photos/21-120000-pict0013-aaa.jpg", "thumb": "thumbs/21-120000-pict0013-aaa.jpg",
+              "takenAt": "2026-11-21T12:00:00+09:00", "width": 4, "height": 3, "caption": { "en": "hi" } },
+            { "id": "22-120000-pict0014", "file": "photos/22-120000-pict0014-bbb.jpg", "thumb": "thumbs/22-120000-pict0014-bbb.jpg",
+              "takenAt": "2026-11-22T12:00:00+09:00", "width": 4, "height": 3 },
+            // Same name, other contents: another camera roll, so it stays.
+            { "id": "01-120000-pict0013", "file": "photos/01-120000-pict0013-zzz.jpg", "thumb": "thumbs/01-120000-pict0013-zzz.jpg",
+              "takenAt": "2026-11-01T12:00:00+09:00", "width": 4, "height": 3 },
+        ]});
+        // pict0013 got a new time and is still green; pict0014 got a new time and is no longer green.
+        let mut retimed = local("23-120000-pict0013", Some("aaa"));
+        retimed.taken_at = "2026-11-23T12:00:00+09:00".into();
+        let mut ungreen = local("24-120000-pict0014", None);
+        ungreen.hash = "bbb".into();
+        let p = plan(&existing, &[retimed, ungreen], &[]).unwrap();
+        let ids: Vec<_> = p.photos.iter().map(|e| str_of(e, "id").unwrap()).collect();
+        assert_eq!(ids, ["23-120000-pict0013", "01-120000-pict0013"]);
+        assert_eq!((p.new, p.changed, p.removed, p.kept_other), (0, 1, 1, 1));
+        assert_eq!(p.photos[0]["caption"]["en"], "hi");
+        assert_eq!(
+            p.orphans,
+            ["photos/21-120000-pict0013-aaa.jpg", "photos/22-120000-pict0014-bbb.jpg", "thumbs/21-120000-pict0013-aaa.jpg", "thumbs/22-120000-pict0014-bbb.jpg"]
         );
     }
 
